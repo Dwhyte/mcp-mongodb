@@ -1,7 +1,9 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import dotenv from "dotenv";
+import express from 'express';
 import { MongoClient } from "mongodb";
 
 dotenv.config();
@@ -83,9 +85,9 @@ const tools = [
       required: []
     }
   }
-]
+];
 
-// Tool implementation
+// Tool implementations
 async function handleQueryUsers(args: any) {
     try {
      const db = mongoClient.db(dbName);
@@ -193,10 +195,8 @@ async function handleCountUsers(args: any) {
   }
 }
 
-// Main server setup
-async function main() {
-    await connectToMongoDB();
-
+// Create and configure the MCP server
+function createServer() {
     const server = new Server({
         name: 'mcp-mongodb-server',
         version: '1.0.0',
@@ -204,36 +204,132 @@ async function main() {
     });
 
     // Handle list tools request
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools
-    };
-  });
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+        return {
+            tools
+        };
+    });
 
-  // Handle call tool request
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
+    // Handle call tool request
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        const { name, arguments: args } = request.params;
+        
+        switch (name) {
+            case 'query_users':
+                return await handleQueryUsers(args);
+            case 'get_user_by_id':
+                return await handleGetUserById(args);
+            case 'count_users':
+                return await handleCountUsers(args);
+            default:
+                throw new Error(`Unknown tool: ${name}`);
+        }
+    });
+
+    return server;
+}
+
+// Main server setup
+async function main() {
+    await connectToMongoDB();
+
+    // Check if we should run HTTP server or stdio
+    const isHttpMode = process.argv.includes('--http') || process.env.MCP_MODE === 'http';
     
-    switch (name) {
-      case 'query_users':
-        return await handleQueryUsers(args);
-      case 'get_user_by_id':
-        return await handleGetUserById(args);
-      case 'count_users':
-        return await handleCountUsers(args);
-      default:
-        throw new Error(`Unknown tool: ${name}`);
-    }
-  });
+    if (isHttpMode) {
+        // HTTP/SSE mode
+        const server = createServer();
+        const app = express();
+        app.use(express.json());
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  
-  // Graceful shutdown
-  process.on('SIGINT', async () => {
-    await mongoClient.close();
-    process.exit(0);
-  });
+        // Store transports for each session
+        const transports: Record<string, SSEServerTransport> = {};
+
+        // SSE endpoint for MCP
+        app.get('/sse', async (req, res) => {
+            const sessionId = req.query.sessionId as string || 'default';
+            
+            const transport = new SSEServerTransport('/messages', res);
+            transports[sessionId] = transport;
+            
+            res.on('close', () => {
+                delete transports[sessionId];
+            });
+            
+            await server.connect(transport);
+        });
+
+        // Message endpoint for SSE
+        app.post('/messages', async (req, res) => {
+            const sessionId = req.query.sessionId as string;
+            const transport = transports[sessionId];
+            
+            if (transport) {
+                await transport.handlePostMessage(req, res, req.body);
+            } else {
+                res.status(400).json({ error: 'No transport found for sessionId' });
+            }
+        });
+
+        // Health check endpoint
+        app.get('/health', (req, res) => {
+            res.json({ 
+                status: 'ok', 
+                server: 'mcp-mongodb-server',
+                version: '1.0.0',
+                tools: tools.map(t => t.name),
+                endpoints: {
+                    sse: '/sse',
+                    messages: '/messages',
+                    health: '/health',
+                    test: '/test'
+                }
+            });
+        });
+
+        // Simple test endpoint
+        app.get('/test', async (req, res) => {
+            try {
+                const db = mongoClient.db(dbName);
+                const collection = db.collection('users');
+                const count = await collection.countDocuments();
+                res.json({ 
+                    message: 'MCP MongoDB Server is running!',
+                    userCount: count,
+                    availableTools: tools.map(t => t.name),
+                    sseEndpoint: '/sse'
+                });
+            } catch (error) {
+                res.status(500).json({ error: 'Database connection failed' });
+            }
+        });
+
+        const port = process.env.PORT || 3000;
+        app.listen(port, () => {
+            console.log(` MCP MongoDB Server (HTTP) running on http://localhost:${port}`);
+            console.log(` Health check: http://localhost:${port}/health`);
+            console.log(`🧪 Test endpoint: http://localhost:${port}/test`);
+            console.log(` SSE endpoint: http://localhost:${port}/sse`);
+            console.log(` Messages endpoint: http://localhost:${port}/messages`);
+        });
+
+        // Graceful shutdown
+        process.on('SIGINT', async () => {
+            await mongoClient.close();
+            process.exit(0);
+        });
+    } else {
+        // Stdio mode (for Claude Desktop)
+        const server = createServer();
+        const transport = new StdioServerTransport();
+        await server.connect(transport);
+        
+        // Graceful shutdown
+        process.on('SIGINT', async () => {
+            await mongoClient.close();
+            process.exit(0);
+        });
+    }
 }
 
 main().catch(console.error);
