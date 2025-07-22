@@ -265,7 +265,7 @@ async function main() {
             const transport = transports[sessionId];
             
             if (transport) {
-                await transport.handlePostMessage(req, res, req.body);
+                await transport.handlePostMessage(req, res);
             } else {
                 res.status(400).json({ error: 'No transport found for sessionId' });
             }
@@ -293,6 +293,8 @@ async function main() {
                 const db = mongoClient.db(dbName);
                 const collection = db.collection('users');
                 const count = await collection.countDocuments();
+
+                console.log("users count", count);
                 res.json({ 
                     message: 'MCP MongoDB Server is running!',
                     userCount: count,

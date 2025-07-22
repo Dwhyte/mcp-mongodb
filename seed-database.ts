@@ -4,7 +4,7 @@ import { MongoClient } from 'mongodb';
 dotenv.config();
 
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017';
-const dbName = 'mcp-mongodb';
+const dbName = process.env.MONGODB_DB_NAME || 'test';
 
 // Sample user data (without _id - MongoDB will auto-generate)
 const users = [
